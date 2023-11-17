@@ -1,59 +1,61 @@
 name: Copy Packages to S3
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
-    inputs:
-      libraries:
-        description: 'JSON array of libraries and versions (e.g., ["requests=2.25.1", "numpy=1.19.5", "pandas=1.2.3"])'
-        required: true
-        default: '["requests=2.25.1", "numpy=1.26.0"]'
 
 env:
-  python_version: "3.10"
-  tfe_dir: layers
-  s3_bucket: "lambda-layer-bucket20231107155009641600000003" # Replace with your S3 bucket name
   AWS_REGION: "us-east-1"
+  LIBRARY_JSON: libraries.json
+  PYTHON_VERSION: "3.8"
+  S3_BUCKET_NAME: "YOUR_BUCKET_NAME"
+  TFE_DIR: layers
 
 jobs:
-  create-lambda-layer-zip:
-    name: Create lambda layer zip
+  configure:
     runs-on: ubuntu-20.04
-    strategy:
-      matrix:
-        library: ${{ fromJson(github.event.inputs.libraries) }}
-    permissions:
-      contents: write
-
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
+      - name: Checkout to repository
+        uses: actions/checkout@v3
+
+      - name: Set matrix data
+        id: set-matrix
+        run: echo "matrix=$(jq -c . < ./${{ env.LIBRARY_JSON }})" >> $GITHUB_OUTPUT
+
+  create-lambda-layer-zip:
+    runs-on: ubuntu-20.04
+    needs: configure
+    strategy:
+      matrix: ${{ fromJson(needs.configure.outputs.matrix) }}
+    steps:
+      - name: Check matrix values
+        run: |
+          echo ${{ matrix.name }}
+          echo ${{ matrix.version }}
+
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Set up Python ${{ env.python_version }}
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v2
         with:
-          python-version: ${{ env.python_version }}
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Extract Name and Version
+        run: |
+          echo "LIBRARY_NAME=${{ matrix.name }}" >> $GITHUB_ENV
+          echo "LIBRARY_VERSION=${{ matrix.version }}" >> $GITHUB_ENV
+          echo "ZIP_NAME=${{ matrix.name }}-${{ matrix.version }}.zip" >> $GITHUB_ENV
 
       - name: Install Python Library and Zip
         run: |
-          mkdir -p layer/python
-          lib_name=$(echo "${{ matrix.library }}" | cut -d"=" -f1)
-          lib_version=$(echo "${{ matrix.library }}" | cut -d"=" -f2)
-          pip3 install "$lib_name==$lib_version" -t layer/python
-          zip -r "${{ matrix.library }}.zip" layer/
-
-      - name: Upload Library Zip
-        uses: actions/upload-artifact@v3
-        with:
-          name: ${{ matrix.library }}
-          path: ./${{ matrix.library }}.zip
-
-  copy-to-s3:
-    name: Copy to S3
-    needs: create-lambda-layer-zip
-    runs-on: ubuntu-20.04
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+          mkdir -p ${{ env.TFE_DIR }}/python
+          pip3 install "${LIBRARY_NAME}==${LIBRARY_VERSION}" -t ${{ env.TFE_DIR }}/python
+          zip -r $ZIP_NAME ${{ env.TFE_DIR }}/
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
@@ -62,17 +64,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Download Artifact Libraries
-        uses: actions/download-artifact@v3
-
       - name: Upload to S3
         run: |
-          libraries_json=${{ toJson(github.event.inputs.libraries) }}
-          libraries=($(echo $libraries_json | jq -r '.[]'))
-          mkdir -p ${{ env.tfe_dir }}
-
-          for artifact_dir in "${libraries[@]}"; do
-            artifact_zip="${artifact_dir}.zip"
-
-            aws s3 cp ${artifact_dir}/${artifact_zip} s3://${{ env.s3_bucket }}/${artifact_zip}
-          done
+          aws s3 cp ./$ZIP_NAME s3://${{ env.S3_BUCKET_NAME }}/"$ZIP_NAME"
