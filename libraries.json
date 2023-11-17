@@ -1,0 +1,6 @@
+{
+    "include": [
+        {"name": "requests", "version": "2.25.1"},
+        {"name": "pytz", "version": "2020.5"}
+    ]
+}
