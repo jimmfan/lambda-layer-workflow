@@ -1,0 +1,118 @@
+name: Plan
+
+on:
+  pull_request:
+    types:
+      - opened
+      - edited
+      - synchronize
+      - ready_for_review
+    branches:
+      - main
+
+env:
+  repo_name: ${{ github.event.repository.name }}
+  python_version: "3.10"
+  tf_vars_path: .auto.tfvars
+
+jobs:
+  plan-infra:
+    name: Plan Terraform Infrastructure
+    runs-on: ubuntu-20.04
+    permissions:
+      contents: read
+      id-token: write
+      packages: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Generate .auto.tfvars
+        run: |
+          echo "account_id=\"${{ vars.AWS_ACCOUNT_ID }}\"" > ${{ env.tf_vars_path }}
+          echo "access_key=\"${{ secrets.AWS_ACCESS_KEY_ID }}\"" >> ${{ env.tf_vars_path }}
+          echo "secret_key=\"${{ secrets.AWS_SECRET_ACCESS_KEY }}\"" >> ${{ env.tf_vars_path }}
+          echo "---------------------------------------------------------"
+          cat ${{ env.tf_vars_path }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          cli_config_credentials_token: ${{ secrets.TF_API_TOKEN }}
+          terraform_version: '1.6.3' # Specify the version of Terraform here
+
+      - name: Terrform format
+        id: fmt
+        run: terraform fmt -check
+
+      # Initialize Terraform
+      - name: Terraform Init
+        id: init
+        run: terraform init
+
+      # Terraform Format and Plan
+      - name: Terraform Plan
+        uses: actions/github-script@v6
+        if: github.event_name == 'pull_request'
+        env:
+          PLAN: "terraform\n${{ steps.plan.outputs.stdout }}"
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // 1. Retrieve existing bot comments for the PR
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            })
+            const botComment = comments.find(comment => {
+              return comment.user.type === 'Bot' && comment.body.includes('Terraform Format and Style')
+            })
+
+            // 2. Prepare format of the comment
+            const output = `#### Terraform Format and Style 🖌\`${{ steps.fmt.outcome }}\`
+            #### Terraform Initialization ⚙️\`${{ steps.init.outcome }}\`
+            #### Terraform Validation 🤖\`${{ steps.validate.outcome }}\`
+            <details><summary>Validation Output</summary>
+
+            \`\`\`\n
+            ${{ steps.validate.outputs.stdout }}
+            \`\`\`
+
+            </details>
+
+            #### Terraform Plan 📖\`${{ steps.plan.outcome }}\`
+
+            <details><summary>Show Plan</summary>
+
+            \`\`\`\n
+            ${process.env.PLAN}
+            \`\`\`
+
+            </details>
+
+            *Pusher: @${{ github.actor }}, Action: \`${{ github.event_name }}\`, Working Directory: \`${{ env.tf_actions_working_dir }}\`, Workflow: \`${{ github.workflow }}\`*`;
+
+            // 3. If we have a comment, update it, otherwise create a new one
+            if (botComment) {
+              github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: output
+              })
+            } else {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: output
+              })
+            }
+
+      # # Terraform Apply (Only for main branch on push event)
+      # - name: Terraform Apply
+      #   if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      #   run: terraform apply -auto-approve
