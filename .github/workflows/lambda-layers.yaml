@@ -10,7 +10,7 @@ on:
 
 env:
   python_version: "3.10"
-  tfe_dir: ./layers
+  tfe_dir: ./example
 
 jobs:
   create-lambda-layer-zip:
