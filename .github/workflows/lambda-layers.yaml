@@ -1,84 +1,76 @@
-name: Deploy Layers
+name: Deploy Layers v2
 
 on:
   workflow_dispatch:
-    inputs:
-      libraries:
-        description: 'JSON array of libraries and versions (e.g., ["requests=2.25.1", "numpy=1.19.5", "pandas=1.2.3"])'
-        required: true
-        default: '["requests=2.25.1", "aws-xray-sdk=2.12.0"]'
 
 env:
-  python_version: "3.10"
-  tfe_dir: ./example
+  AWS_REGION: "us-east-1"
+  LIBRARY_JSON: libraries.json
+  PYTHON_VERSION: "3.8"
+  TFE_DIR: layers
 
 jobs:
-  create-lambda-layer-zip:
-    name: Create lambda layer zip
+  configure:
     runs-on: ubuntu-20.04
-    strategy:
-      matrix:
-        library: ${{ fromJson(github.event.inputs.libraries) }}
-    permissions:
-      contents: write
-
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
+      - name: Checkout to repository
+        uses: actions/checkout@v3
+
+      - name: Set matrix data
+        id: set-matrix
+        run: echo "matrix=$(jq -c . < ./${{ env.LIBRARY_JSON }})" >> $GITHUB_OUTPUT
+
+  create-zip:
+    runs-on: ubuntu-20.04
+    needs: configure
+    strategy:
+      matrix: ${{ fromJson(needs.configure.outputs.matrix) }}
+    steps:
+      - name: Check matrix values
+        run: |
+          echo ${{ matrix.name }}
+          echo ${{ matrix.version }}
+
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Set up Python ${{ env.python_version }}
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
         uses: actions/setup-python@v2
         with:
-          python-version: ${{ env.python_version }}
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Extract Name and Version
+        run: |
+          echo "LIBRARY_NAME=${{ matrix.name }}" >> $GITHUB_ENV
+          echo "LIBRARY_VERSION=${{ matrix.version }}" >> $GITHUB_ENV
+          echo "ZIP_NAME=${{ matrix.name }}-${{ matrix.version }}.zip" >> $GITHUB_ENV
 
       - name: Install Python Library and Zip
         run: |
-          mkdir -p layer/python
-          lib_name=$(echo "${{ matrix.library }}" | cut -d"=" -f1)
-          lib_version=$(echo "${{ matrix.library }}" | cut -d"=" -f2)
-          pip3 install "$lib_name==$lib_version" -t layer/python
-          zip -r "${{ matrix.library }}.zip" layer/
+          mkdir -p lambda_layers/python
+          pip3 install "${LIBRARY_NAME}==${LIBRARY_VERSION}" -t lambda_layers/python
+          zip -r $ZIP_NAME lambda_layers/
 
       - name: Upload Library Zip
         uses: actions/upload-artifact@v3
         with:
-          name: ${{ matrix.library }}
-          path: ./${{ matrix.library }}.zip
+          name: layers-zip
+          path: ${{ env.ZIP_NAME }}
 
   deploy_lambda_layer:
     name: Deploy lambda layer
-    needs: create-lambda-layer-zip
+    needs: create-zip
     runs-on: ubuntu-20.04
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: Generate Terraform Variables File
-        run: |
-          libraries_json=${{ toJson(github.event.inputs.libraries) }}
-          echo "libraries = [" > libraries.tfvars
-          for lib in $(echo $libraries_json | jq -r '.[]'); do
-            name=$(echo "$lib" | cut -d'=' -f1)
-            zip_path="${lib}.zip"
-            echo "  { name = \"$name\", zip_path = \"$zip_path\" }," >> libraries.tfvars
-          done
-          echo "]" >> libraries.tfvars
-        working-directory: ${{ env.tfe_dir }}
-
-      - name: Download Artifact Libraries
-        uses: actions/download-artifact@v3
-
-      - name: Rename to match Terraform input
-        run: |
-          libraries_json=${{ toJson(github.event.inputs.libraries) }}
-          libraries=($(echo $libraries_json | jq -r '.[]'))
-          mkdir -p ${{ env.tfe_dir }}
-
-          for artifact_dir in "${libraries[@]}"; do
-            artifact_zip="${artifact_dir}.zip"
-
-            mv "${artifact_dir}/${artifact_zip}" "${{ env.tfe_dir }}/"
-          done
+      - uses: actions/download-artifact@v3
+        with:
+          name: layers-zip
+          path: ${{ env.TFE_DIR }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v2
@@ -89,5 +81,5 @@ jobs:
       - name: Deploy with Terraform
         run: |
           terraform init
-          terraform apply -auto-approve -var-file="libraries.tfvars"
-        working-directory: ${{ env.tfe_dir }}
+          terraform apply -auto-approve
+        working-directory: ${{ env.TFE_DIR }}
